@@ -46,11 +46,46 @@ import sys
 import numpy as np
 import grid.grid as grid
 import ppdb.pdb as pdb
+import argparse
+
+KB = 1.987204118e-3  # kB in kcal/K/mol
 
 
-def converttopop(distribution, delta, conc):
+
+def process_command_line(argv):
+    """
+    Processes arguments and returns namespace of them
+    """
+    parser = argparse.ArgumentParser(description="""Placevent
+
+This program is designed to automatically place explicit solvent atoms/ions
+based on 3D-RISM data. The 3D-RISM correlations should be in a DX file.""")
+    #Positional args
+    parser.add_argument('distrib', metavar='gridfile',
+                        help=""".dx or MDF .h5 file.""")
+    parser.add_argument('conc', metavar='conc',
+                        help="""Concentration M (molar).""", type=float)
+    #Optional args
+    parser.add_argument('--total_cor',
+                        help=""" DX file is h(r). Doesn't work with h5 distributions.
+                        """,
+                        action='store_true')
+    parser.add_argument('--cutoff',
+                        help="""cutoff g(r) [1.5]""",
+                        default=1.5, type=float)
+    parser.add_argument('--therm', help="""Print thermodynamic information.""",
+                        action='store_true')
+    parser.add_argument('--temp', help="""Temperature in Kelvins [298.15]""",
+                        default=298.15, type=float)
+    return parser.parse_args(argv)
+
+
+def converttopop(distribution, delta, conc, total_cor=False):
     '''Convert distribution fn to population fn using concentration.
-
+    
+    If total_cor is True, assumes that distribution is total correlation
+    function h(r) and converts it to g(r) by adding 1.
+    
     Returns: 
     1) Population function (numpy array)
     2) Expected total population in grid (float)
@@ -71,6 +106,8 @@ def converttopop(distribution, delta, conc):
     for i in range(xlen):
         for j in range(ylen):
             for k in range(zlen):
+                if total_cor:
+                    distribution[i][j][k] += 1.0
                 popzero[i][j][k] = distribution[i][j][k] * conc \
                     * gridvolume
                 totalpop += popzero[i][j][k]
@@ -87,8 +124,12 @@ def doplacement(
     delta,
     shellindices,
     grcutoff,
-    ):
+    therm=False,
+    temperature=298.15):
     '''Does iterative portion of placement according to Placevent Algorithm
+    If therm == True, prints additional thermodynamic information using
+    stderr.
+
 
     Returns:
     NumPy array of "Atom" Class objects
@@ -169,6 +210,15 @@ def doplacement(
 
         myg0 = popzero[maxi][maxj][maxk] / (conc * gridvolume)  # Original g(r).
         mygi = mymax / (conc * gridvolume)  # g(r) when placed.
+        if therm:
+            orig_free_en = -KB*temperature*np.log(myg0)
+            free_en_placed = -KB*temperature*np.log(mygi)
+            sys.stderr.write('Found peak\n')
+            sys.stderr.write('Coordinates: {:.2f} {:.2f} {:.2f}\n'.format( maxi * delta[0]
+                             + origin[0], maxj * delta[1] + origin[1],
+                             maxk * delta[2] + origin[2] ))
+            sys.stderr.write('Original free energy: {} kcal/mol\n'.format(orig_free_en))
+            sys.stderr.write('Free energy when placed: {} kcal/mol\n\n'.format(free_en_placed))
         placedcenters.append(pdb.Atom(serial=len(placedcenters),
                              resseq=index, coord=[maxi * delta[0]
                              + origin[0], maxj * delta[1] + origin[1],
@@ -179,13 +229,20 @@ def doplacement(
     return placedcenters
 
 
-def returncenters(guvfilename, molar, grcutoff):
+def returncenters(guvfilename, molar, grcutoff, total_cor=False, therm=False,
+                  temperature=298.15):
     '''Given distribution, returns placed atoms
+    
+    If total_cor is True, assumes that distribution is total correlation
+    function h(r) and converts it to g(r) by adding 1.
+
+    If therm == True, prints additional thermodynamic information using
+    stderr.
+
 
     Input: guvfilename and molarity
     Returns: Placed centers as Atom objects
     '''
-
     conc = molar * 6.0221415E-4
     shellindices = grid.readshellindices()
     if guvfilename[-3:] == ".dx":
@@ -205,29 +262,20 @@ def returncenters(guvfilename, molar, grcutoff):
         exit("Error, incompatible file type! -> {0}".format(guvfilename))
 
     (popzero, totalpop, gridvolume) = converttopop(distribution,
-            delta, conc)
+            delta, conc, total_cor)
     return doplacement(popzero, conc, gridvolume, origin, delta, shellindices,
-        grcutoff)
+        grcutoff, therm, temperature)
 
 
-def main():
-    print '# placevent.py <.dx or MDF .h5 file> <concentration M (molar)> [cutoff g(r) ' \
-          ' (default 1.5)]\n'
-    print '# Concentration (#/A^3) ~= molarity * 6.0221415E-4'
-    if len(sys.argv) < 3:
-        print 'Insufficient arguments need 2 : ', len(sys.argv) - 1
-        exit()
-    if len(sys.argv) == 4:
-        grcutoff = float(sys.argv[3])
-    else:
-        grcutoff = 1.5
-    guvfilename = sys.argv[1]
-    molar = float(sys.argv[2])
-    print '# Your .dx file is', guvfilename, 'molarity is', molar, 'M'
-    placedcenters = returncenters(guvfilename, molar, grcutoff)
+def main(argv):
+    args = process_command_line(argv)
+    guvfilename = args.distrib
+    molar = args.conc
+    placedcenters = returncenters(guvfilename, molar, args.cutoff, args.total_cor,
+                                  args.therm, args.temp)
     for center in placedcenters:
         print str(center)[:-2]  # [:-2] is to get rid of the '\n'
 
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv[1:])
